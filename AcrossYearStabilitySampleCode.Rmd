@@ -1,0 +1,626 @@
+---
+title: "Across-Year Stability Code"
+author: "JuliaSunga"
+date: "07/03/2022"
+output: pdf_document
+---
+
+All of the following analyses use the data file pregnancydataset.RData which is the same as used in the seasonl paper. For some portions of this code, capture data including the individual ages is also used. A subset of the capturedatabase including just the required info for those specific individuals is referenced in this code. 
+
+#Lagged Association Rate (Figure 1)
+
+This first code chunk is used to calculate the lagged association rates (Figure 1) and relies on the pregnancydataset.RData
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load in and rename the dataset and the required packages
+load("pregnancydataset.RData")
+
+library(data.table)
+library(asnipe)
+library(MuMIn)
+library(dplyr)
+library(ggplot2)
+library(igraph)
+mysubset<-pregnancydata
+
+
+
+#go from the list of PIT reader observations to a group-by-individuals matrix 
+mysubset$daygroup<-as.factor(paste(mysubset$reader_date, mysubset$box, sep="_"))
+individuals <- mysubset[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI <- get_group_by_individual(individuals, data_format = "individuals")
+
+individuals2<-individuals[, .N, by= .(group, day)]
+
+#create timesteps for each day and a list of "locations"
+locations<-individuals$loc
+
+individuals<-data.table(ID=c(mysubset$pit), group=mysubset$daygroup, day=c(mysubset$reader_date))
+#convert day to JDate 
+individuals2<-individuals[, .N, by= .(group, day)]
+times<-individuals2$day
+times2<-as.numeric(times)
+
+#calculate the lagged association rate
+lagged_rates<-LAR(sampleGBI, times2, 1)
+
+########Caclulate the null rate based on what is outlined by Whitehead 2008
+# = mean degree/# of individuals - 1
+#calculate mean degree
+## generate matrix
+net_matrix <- get_network(sampleGBI,data_format="GBI",association_index="SRI")
+
+## generate network
+graph_object <- graph.adjacency(net_matrix,mode="undirected",diag=FALSE,weighted=TRUE)
+
+#get average total associates per animal
+deg<-degree(graph_object, v=V(graph_object), mode="all")
+meandeg<-mean(deg)
+
+#get average group size 
+#count occurrences of unique group-day combos
+greg<-count(mysubset, daygroup)
+meangreg<-mean(greg$n)
+
+# get # of individuals 
+nID<-n_distinct(individuals$ID)
+
+#null value
+null<-meangreg/(nID-1)
+
+#Plot the lagged association rate (Figure 1 - main) - this code does not work in RMarkdown but will run if copied into regular R
+alldata<-data.table(lagged_rates)
+names(alldata)<-c("x", "value")
+plot(alldata$value, type='l', axes=FALSE, xlab="Number of days since first interaction", ylab="Lagged Association Rate", ylim=c(0,0.6), xlim=c(0,3500), cex.lab=1.5, cex.sub=1.5, cex.axis=2)
+axis(2, cex.axis=1.5)
+axis(1, cex.axis=1.5)
+abline(h=null, col="red", lty="dashed")
+
+#the following code is used to generate the inset - plots were arranged in powerpoint 
+
+#need to start by converting everything to Julian Day as we want to work with patterns within summers across years
+
+#grouping by JDate, count the number of boxes used 
+roostscount<-pregnancydata %>% group_by(JDate, reader_year) %>% summarise(roosts=n_distinct(box))
+
+
+#create a line plot with shaded SE
+ggplot(roostscount, aes(x=JDate,y=roosts))+stat_smooth(method="loess", span=0.1, se=TRUE) + theme_bw() +
+  ylab("Number of Roosts Used") + xlab("Julian Day")
+
+```
+
+
+#Association Strengths Across Years (Mantel Tests - Figure 2) and Accounting for Roost Use Patterns (MRQAP - Figure 3, Table 1, and S1)
+
+This next code chunk is used to calculate the correlation between networks between years and MRQAP for all possible combinations of years. 
+
+This code only shows an example for one set of years but numbers in code can be adjusted to run all possible year combinations. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load all required packages
+library(dplyr)
+library(data.table)
+library(asnipe)
+library(igraph)
+library(ecodist)
+library(reshape2)
+library(gdata)
+library(beepr)
+library(ggplot2)
+library(tidyr)
+
+
+##read in the pregnancy dataset
+load("pregnancydataset.RData")
+
+#create separate datasets for each year 
+pregnancy2019<-pregnancydata %>% filter(reader_year=="2019")
+pregnancy2021<-pregnancydata %>% filter(reader_year=="2021")
+
+#create a list of individuals in both years for all combinations
+p19to21pitlist<-intersect(pregnancy2019$pit, pregnancy2021$pit)
+
+
+
+#from each year, pull all records for the pits in the corresponding pitlist - change the years in below as appropriate 
+
+pregcomparison<-pregnancy2019[pregnancy2019$pit %in% p19to21pitlist]
+length(unique(pregcomparison$pit))
+
+pregfocal<-pregnancy2021[pregnancy2021$pit %in% p19to21pitlist]
+length(unique(pregfocal$pit))
+
+#create the networks - in this case we just need to go up to creating the SRI matrix
+###NETWORK 1
+pregcomparison$daygroup<-paste(pregcomparison$box, "-", pregcomparison$reader_date)
+
+#create matrix of individuals and whether they were in a box-group together
+pregnantindividualscomparison<-data.frame(ID=c(pregcomparison$pit), group=c(pregcomparison$daygroup), day=c(pregcomparison$reader_date))
+pregnantGBIcomparison<-get_group_by_individual(pregnantindividualscomparison, data_format="individuals")
+
+#turn this into an association matrix based on the SRI
+pregnant_matrixcomparison<-get_network(pregnantGBIcomparison, data_format="GBI", association_index="SRI")
+
+##NETWORK 2
+pregfocal$daygroup<-paste(pregfocal$box, "-", pregfocal$reader_date)
+
+#create matrix of individuals and whether they were in a box-group together
+pregnantindividualsfocal<-data.frame(ID=c(pregfocal$pit), group=c(pregfocal$daygroup), day=c(pregfocal$reader_date))
+pregnantGBIfocal<-get_group_by_individual(pregnantindividualsfocal, data_format="individuals")
+
+#turn this into an association matrix based on the SRI
+pregnant_matrixfocal<-get_network(pregnantGBIfocal, data_format="GBI", association_index="SRI")
+
+
+#run the mantel test 
+
+pregnant_matrixcomparison=pregnant_matrixcomparison[order(rownames(pregnant_matrixcomparison)),order(rownames(pregnant_matrixcomparison))] #reorder the rows/columns by alphanumeric order
+pregnant_matrixfocal=pregnant_matrixfocal[order(rownames(pregnant_matrixfocal)),order(rownames(pregnant_matrixfocal))] 
+
+mantel(lower(as.dist(pregnant_matrixcomparison))~ lower(as.dist(pregnant_matrixfocal)), nperm = 1000,
+       mrank = TRUE, nboot = 500, pboot = 0.9, cboot = 0.95)
+
+
+#plot the relationships for each dyad in each year - Figure 2A
+plot(pregnant_matrixcomparison[upper.tri(pregnant_matrixcomparison)], pregnant_matrixfocal[upper.tri(pregnant_matrixfocal)], pch=19, cex=1, col=rgb(red=0, green=0, blue=0, alpha=0.25), xlab="2019 SRI", ylab="2021 SRI", xlim=c(0,1), ylim=c(0,1))
+
+
+#repeat the above for all possible year combinations and store the results in an excel worksheet.
+#Add a column that corresponds to the difference between the years being compared
+#convert to .csv and read back in to create Figure 2B
+
+
+#read in your .csv file, whatever that may be called 
+
+#plot
+ggplot(results, aes(x=as.factor(Years.Difference), y=Mantel.R, group=as.factor(Comparison.Year) )) + 
+  geom_point(aes(shape=as.factor(Comparison.Year)), size=3) +
+  labs(shape='First Year of Comparison') + xlab("Number of Years Difference") + ylab("Mantel R Correlation Score") +theme_bw() +    
+  scale_shape_manual(values=c(0, 1, 2, 3, 8, 7, 16, 17 ))
+
+
+###########MRQAP########################
+
+#create a third matrix which is the similarity in roost use between individuals (we expect this would be highly predictive but want to see if previous year still has an "effect")
+#Shizuka words this as co-occurrence probability (based on % of home range overlap), need to think about how I do this for the bats 
+###i think in this case I multiply the % of co-occurrence at every box (% of time spent at each box) and then sum these across all boxes 
+
+##first create an individual x roost matrix for the focal year to show the proportion of days spent in each box. In this case it should be the proportion of total observed days in the network 
+###for each pit, count number of occurrences in each box
+pregroostuse<-pregfocal %>% group_by(pit) %>% dplyr::count(box, name="use") %>% ungroup()
+
+pregroostuse$proportion<-pregroostuse$use/length(unique(pregfocal$reader_date))
+
+#drop the columns
+pregroostuse2<-subset(pregroostuse, select=-c(use))
+###convert to individual x box matrix and populate with 0's
+pregnancyusedf<-pivot_wider(pregroostuse2, names_from = box, values_from = proportion)
+
+#setNA to zero
+pregnancyusedf[is.na(pregnancyusedf)] <- 0
+
+#convert to a dataframe
+pregnancyusedf<-as.data.frame(pregnancyusedf)
+
+##now for all pairwise comparisons of rows, multiply the values in each box, then sum across all columns 
+
+##maybe don't need to turn it into a matrix right away, do this one column at a time, sum them, then create the matrix 
+useoverlap<-transpose(as.data.frame((combn(pregnancyusedf$pit, 2))))
+
+##join in the proportions for each bat
+test2019<-as.data.frame(apply(pregnancyusedf[, -1], 2, function(x) {
+  (combn(x, 2, prod))}) )
+
+#because these are done sequentially based on the row numbers (not names) and we are using the same base dataframe for both, it is ok to create the names and the values separately then cbind together. I have verified this with a couple of sample rows
+#would be nice though if I could do this in one step to be absolutely sure 
+test2<-cbind(useoverlap, test2019)
+
+#sum the box columns - need to adjust this based on the boxes present in the network 
+test2$totaloverlap<-   test2$`103`+ test2$`104`+test2$`106`+test2$`107`+test2$`108`+test2$`109`+test2$`110`
+
+#just keep the three needed columns
+test3<-test2 %>% select(V1, V2, totaloverlap)
+
+
+#need to insert a row at the top that is the first individual compared to itself and last individual compared to itself so it matches the other matrices
+#adjust the PITS as needed 
+firstrow<-data.frame(V1="00071E796E", V2="00071E796E", totaloverlap=0) #this will be the first bat in the first column
+lastrow<-data.frame(V1="000799FABB ", V2="000799FABB ", totaloverlap=0) #this will be the last bat in the second column 
+test4<-rbind(firstrow, test3, lastrow)
+
+
+#convert this to an individual x individual matrix - gives only the upper triangle which is fine 
+overlapmatrix2019<-acast(test4, V1 ~ V2, value.var="totaloverlap")
+
+#make sure everything is in the same order - this is missing one row and column compared to the SRI matrices
+overlapmatrix2019=overlapmatrix2019[order(rownames(overlapmatrix2019)),order(rownames(overlapmatrix2019))] 
+
+#now need to make matrix symmetrical 
+lowerTriangle(overlapmatrix2019) <- upperTriangle(overlapmatrix2019, byrow=TRUE)
+
+
+#make sure all matrices are ordered properly
+pregnant_matrixfocal=pregnant_matrixfocal[order(rownames(pregnant_matrixfocal)),order(rownames(pregnant_matrixfocal))] #reorder the rows/columns by alphanumeric order
+pregnant_matrixcomparison=pregnant_matrixcomparison[order(rownames(pregnant_matrixcomparison)),order(rownames(pregnant_matrixcomparison))] 
+
+
+#test the effect of m2 on m1 controlling for m3 and m3 on m1 controlling for m2 - this is an asnipe function 
+#used scales effects so that you can then tell you which is more influential 
+mrqap.dsp(scale(pregnant_matrixfocal)~scale(pregnant_matrixcomparison) + scale(overlapmatrix2019))
+
+
+#as with the Mantels, record all results in an excel table, add a column for difference between years, then convert to .csv for visualization
+#read in your .csv file, whatever that may be called 
+
+
+#calculate fold difference
+resultsMRQAP$Fold.Difference<-resultsMRQAP$Roost.scaled.effect/resultsMRQAP$previous.year.scaled.effect
+
+#calculate Years.Difference
+resultsMRQAP$Year.Difference<-resultsMRQAP$Focal.Year-resultsMRQAP$Comparison.Year
+
+#remove 2012 to 2017 for this since the effect of one is 0 and messes up visualization
+
+#plot and manually scale the values so that thte symbols match Figure 2B despite missing one set of comparisons
+ggplot(resultsMRQAP, aes(x=as.factor(Year.Difference), y=Fold.Difference, group=as.factor(Focal.Year) )) +geom_point(aes(shape=as.factor(Focal.Year)), size=3) +
+  labs(shape='Focal Year') + xlab("Number of Years Difference") + ylab("Fold Difference in Scaled Factors") +theme_bw() + scale_shape_manual(values=c(1, 2, 3, 8, 7, 16, 17, 10 ))
+
+
+```
+
+
+
+#Known Aged Analysis (Figure 4) and Cohort Anlaysis 
+
+This next bit is what will require using the capture data to get individual ages into the data frame.
+
+For these analyses I have included the code to run all years as this is what is needed for the figure. The networks being compared do not require the subsetting as above as it is not required that only individuals present in multiple years are used to find the known-aged individuals' network position. 
+
+```{r}
+#read in the pregnancy data
+
+load("pregnancydataset.RData")
+
+#load required packages
+library(tidyr)
+library(dplyr)
+library(asnipe)
+library(igraph)
+library(data.table)
+library(reshape2)
+library(ggplot2)
+library(wrMisc) #for individual CV SRI calculation 
+
+
+#we want to create annual networks with all individuals that have at least 10 observations 
+
+#subset by year then create network
+
+mysubset2012<-pregnancydata %>% filter(reader_year==2012)
+mysubset2012$daygroup<-as.factor(paste(mysubset2012$reader_date, mysubset2012$box, sep="_"))
+individuals2012 <- mysubset2012[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2012 <- get_group_by_individual(individuals2012, data_format = "individuals")
+network2012<-get_network(sampleGBI2012, data_format="GBI", association_index="SRI")
+graph_object2012 <- graph.adjacency(network2012,mode="undirected",diag=FALSE,weighted=TRUE)
+
+
+mysubset2013<-pregnancydata %>% filter(reader_year==2013)
+mysubset2013$daygroup<-as.factor(paste(mysubset2013$reader_date, mysubset2013$box, sep="_"))
+individuals2013 <- mysubset2013[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2013 <- get_group_by_individual(individuals2013, data_format = "individuals")
+network2013<-get_network(sampleGBI2013, data_format="GBI", association_index="SRI")
+graph_object2013 <- graph.adjacency(network2013,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2014<-pregnancydata %>% filter(reader_year==2014)
+mysubset2014$daygroup<-as.factor(paste(mysubset2014$reader_date, mysubset2014$box, sep="_"))
+individuals2014 <- mysubset2014[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2014 <- get_group_by_individual(individuals2014, data_format = "individuals")
+network2014<-get_network(sampleGBI2014, data_format="GBI", association_index="SRI")
+graph_object2014 <- graph.adjacency(network2014,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2015<-pregnancydata %>% filter(reader_year==2015)
+mysubset2015$daygroup<-as.factor(paste(mysubset2015$reader_date, mysubset2015$box, sep="_"))
+individuals2015 <- mysubset2015[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2015 <- get_group_by_individual(individuals2015, data_format = "individuals")
+network2015<-get_network(sampleGBI2015, data_format="GBI", association_index="SRI")
+graph_object2015 <- graph.adjacency(network2015,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2016<-pregnancydata %>% filter(reader_year==2016)
+mysubset2016$daygroup<-as.factor(paste(mysubset2016$reader_date, mysubset2016$box, sep="_"))
+individuals2016 <- mysubset2016[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2016 <- get_group_by_individual(individuals2016, data_format = "individuals")
+network2016<-get_network(sampleGBI2016, data_format="GBI", association_index="SRI")
+graph_object2016 <- graph.adjacency(network2016,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2017<-pregnancydata %>% filter(reader_year==2017)
+mysubset2017$daygroup<-as.factor(paste(mysubset2017$reader_date, mysubset2017$box, sep="_"))
+individuals2017 <- mysubset2017[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2017 <- get_group_by_individual(individuals2017, data_format = "individuals")
+network2017<-get_network(sampleGBI2017, data_format="GBI", association_index="SRI")
+graph_object2017 <- graph.adjacency(network2017,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2018<-pregnancydata %>% filter(reader_year==2018)
+mysubset2018$daygroup<-as.factor(paste(mysubset2018$reader_date, mysubset2018$box, sep="_"))
+individuals2018 <- mysubset2018[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2018 <- get_group_by_individual(individuals2018, data_format = "individuals")
+network2018<-get_network(sampleGBI2018, data_format="GBI", association_index="SRI")
+graph_object2018 <- graph.adjacency(network2018,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2019<-pregnancydata %>% filter(reader_year==2019)
+mysubset2019$daygroup<-as.factor(paste(mysubset2019$reader_date, mysubset2019$box, sep="_"))
+individuals2019<- mysubset2019[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2019<- get_group_by_individual(individuals2019, data_format = "individuals")
+network2019<-get_network(sampleGBI2019, data_format="GBI", association_index="SRI")
+graph_object2019 <- graph.adjacency(network2019,mode="undirected",diag=FALSE,weighted=TRUE)
+
+mysubset2021<-pregnancydata %>% filter(reader_year==2021)
+mysubset2021$daygroup<-as.factor(paste(mysubset2021$reader_date, mysubset2021$box, sep="_"))
+individuals2021<- mysubset2021[, .(ID = pit, group = daygroup, day = reader_date)]
+sampleGBI2021<- get_group_by_individual(individuals2021, data_format = "individuals")
+network2021<-get_network(sampleGBI2021, data_format="GBI", association_index="SRI")
+graph_object2021 <- graph.adjacency(network2021,mode="undirected",diag=FALSE,weighted=TRUE)
+
+#now get a list of all pits that have an agetype of "exactly"
+
+knownagebats<-pregnancydata %>% filter(agetype=="exactly") 
+knownagelist<-unique(knownagebats$pit) #total of 42 adult bats whose age we know
+
+
+################COHORT ASSOCIATION STRENGTHS - start with just one year then repeat for all above years
+#this can only start in 2013 because 2012 exact age would all be juveniles
+
+#pull the rows in each matrix corresponding to the known aged individuals 
+knownbatsmatrix2013<-network2013[rownames(network2013) %in% knownagelist,]
+knownbatsmatrix2014<-network2014[rownames(network2014) %in% knownagelist,]
+knownbatsmatrix2015<-network2015[rownames(network2015) %in% knownagelist,]
+knownbatsmatrix2016<-network2016[rownames(network2016) %in% knownagelist,]
+knownbatsmatrix2017<-network2017[rownames(network2017) %in% knownagelist,]
+knownbatsmatrix2018<-network2018[rownames(network2018) %in% knownagelist,]
+knownbatsmatrix2019<-network2019[rownames(network2019) %in% knownagelist,]
+knownbatsmatrix2021<-network2021[rownames(network2021) %in% knownagelist,]
+
+#switch this to long format (ie. focal bat, associate bat, association strength)
+#start at 2014 as there is only one bat in 2013
+
+longknownmatrix2014<-melt(knownbatsmatrix2014) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2014$reader_year<-2014
+
+longknownmatrix2015<-melt(knownbatsmatrix2015) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2015$reader_year<-2015
+
+longknownmatrix2016<-melt(knownbatsmatrix2016) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2016$reader_year<-2016
+
+longknownmatrix2017<-melt(knownbatsmatrix2017) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2017$reader_year<-2017
+
+longknownmatrix2018<-melt(knownbatsmatrix2018) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2018$reader_year<-2018
+
+longknownmatrix2019<-melt(knownbatsmatrix2019) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2019$reader_year<-2019
+
+longknownmatrix2021<-melt(knownbatsmatrix2021) %>% rename(focalbat= Var1, associatebat=Var2, SRI=value)
+#add a year 
+longknownmatrix2021$reader_year<-2021
+
+
+#join all of these together
+allknownassociates<-rbind(longknownmatrix2014, longknownmatrix2015, longknownmatrix2016, longknownmatrix2017, longknownmatrix2018, longknownmatrix2019, longknownmatrix2021)
+
+
+#add columns for cohort of focal bat and cohort of associate bat - NA if an atleast individual
+
+#from the pregnancy dataset, get the data on pit and capture_year for only bats whose agetype is exact
+cohortinfo<-pregnancydata %>% filter(agetype=="exactly") %>% select(pit, reader_year,corrected_age) %>% unique()
+focalinfo<-cohortinfo %>% rename(focalbat=pit) 
+associateinfo<-cohortinfo %>% rename(associatebat=pit)
+#going to join this twice, once to focal bat, once to associate bat
+knownwithcohort1<-merge(allknownassociates, focalinfo, by=c("focalbat", "reader_year"), all=TRUE) %>% rename(focalage=corrected_age)
+knownwithcohort2<-merge(knownwithcohort1, associateinfo, by=c("associatebat", "reader_year"), all=TRUE) %>% dplyr::rename(associateage=corrected_age)
+
+#there are some bats that need to be corrected manually - use the allknownage.csv created below to get the ages back in
+
+#remove rows where SRI = NA
+knownwithcohort3<-knownwithcohort2 %>% drop_na(SRI)
+
+#create a column of TRUE/FALSE whether bats are from the same cohort
+knownwithcohort3$samecohort<-ifelse(knownwithcohort3$focalage==knownwithcohort3$associateage, TRUE, FALSE)
+
+#first of all how many bats do I have that have associates in the same cohort
+#remove NAs since we don't know if they're a same or different cohort and this could screw up results
+knowncohortdataset<-knownwithcohort3 %>% drop_na(samecohort)
+
+samecohortbats<-knowncohortdataset %>% filter(samecohort==TRUE)
+#680 relationships vs. 41200 relationships (ish)
+length(unique(samecohortbats$focalbat)) #41 bats that associate within their cohort
+
+##CHI - SQUARE TEST of # of associates
+
+#from focal info, count number of each age in each year 
+agecount<-focalinfo %>% group_by(reader_year, corrected_age) %>% count()
+
+agecounttotal<-focalinfo %>% group_by(reader_year) %>% count()
+
+agecountdataframe<-merge(agecount, agecounttotal, by="reader_year")
+
+agecountdataframe$ratio<-(agecountdataframe$n.y-agecountdataframe$n.x)/agecountdataframe$n.x
+
+mean(agecountdataframe$ratio) #on average 6.4 x as many individuals outside the cohort as within 
+
+#now get the average within and among cohort associates to find that ratio 
+actualnumassociates<-numassociates %>% group_by(samecohort, reader_year) %>% summarise(mean=mean(n))
+
+
+#take the ratio within each year - export to csv to calculate and format as I just found this faster
+write.csv(actualnumassociates, "ratiocalculation.csv") #2.5 as many associates outside the cohort as within 
+
+#read that formated data back in (2x2 table with whole numbers)
+chisquaresetup<-read.csv("chisquaresetup.csv")
+
+#remove the first column that gets read in with the CSV and set it up so that the column names
+rownames(chisquaresetup) <- chisquaresetup[,1] 
+chisquaresetup<-chisquaresetup %>% select(-X)
+
+#run the chi square test
+chisq.test(chisquaresetup, correct=TRUE)
+
+
+####Cohort Association Strength
+#group by focal bat and TRUE/FALSE and summarize the mean association strength 
+summarySRIcohorts<-knowncohortdataset %>% dplyr::group_by(focalbat, samecohort) %>% dplyr::summarise(mean=mean(SRI)) %>% ungroup()
+
+#change False to Different and True to Same
+knowncohortdataset$samecohort<-replace(knowncohortdataset$samecohort, knowncohortdataset$samecohort==FALSE, "Different")
+knowncohortdataset$samecohort<-replace(knowncohortdataset$samecohort, knowncohortdataset$samecohort==TRUE, "Same")
+
+#now lets try plotting the variation for each individual - want this black and white - not currently included in manuscript
+knowncohortdataset %>% ggplot(aes(x=focalbat, y=SRI, fill=samecohort)) + geom_boxplot(outlier.shape=21) + coord_flip() +theme_bw() + xlab("Focal Bat ID") + 
+  ylab("Half Weight Index") + labs(fill="Same Cohort") + scale_fill_brewer(type = "seq", palette = "Greys")
+
+#perform a statistical test -paired t-test since we've created a dataset where there is equal sample size between false and true
+
+#run the paired t.est
+t.test(mean~samecohort, data=summarySRIcohorts, paired=TRUE, alternative="two.sided")
+#t = 0.261, p = 0.795
+
+###################NETWORK POSITION BY AGE
+
+#for each bat in the knownagelist, calculate degree, betweenness centrality, and CV SRI in every year they appear
+
+values2012<-as.data.frame(degree(graph_object2012)) %>% rename(degree="degree(graph_object2012)")
+values2012$cb<-centr_betw(graph_object2012)$res
+values2012$pit<-rownames(values2012)
+
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2012<-as.data.frame(rowCVs(network2012)) %>% rename(CV="rowCVs(network2012)")
+CVlist2012$pit<-rownames(CVlist2012)
+allvalues2012<-merge(values2012, CVlist2012, by="pit")
+allvalues2012$reader_year<-2012
+
+values2013<-as.data.frame(degree(graph_object2013)) %>% rename(degree="degree(graph_object2013)")
+values2013$cb<-centr_betw(graph_object2013)$res
+values2013$pit<-rownames(values2013)
+
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2013<-as.data.frame(rowCVs(network2013)) %>% rename(CV="rowCVs(network2013)")
+CVlist2013$pit<-rownames(CVlist2013)
+allvalues2013<-merge(values2013, CVlist2013, by="pit")
+allvalues2013$reader_year<-2013
+
+values2014<-as.data.frame(degree(graph_object2014)) %>% rename(degree="degree(graph_object2014)")
+values2014$cb<-centr_betw(graph_object2014)$res
+values2014$pit<-rownames(values2014)
+
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2014<-as.data.frame(rowCVs(network2014)) %>% rename(CV="rowCVs(network2014)")
+CVlist2014$pit<-rownames(CVlist2014)
+allvalues2014<-merge(values2014, CVlist2014, by="pit")
+allvalues2014$reader_year<-2014
+
+values2015<-as.data.frame(degree(graph_object2015)) %>% rename(degree="degree(graph_object2015)")
+values2015$cb<-centr_betw(graph_object2015)$res
+values2015$pit<-rownames(values2015)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2015<-as.data.frame(rowCVs(network2015)) %>% rename(CV="rowCVs(network2015)")
+CVlist2015$pit<-rownames(CVlist2015)
+allvalues2015<-merge(values2015, CVlist2015, by="pit")
+allvalues2015$reader_year<-2015
+
+values2016<-as.data.frame(degree(graph_object2016)) %>% rename(degree="degree(graph_object2016)")
+values2016$cb<-centr_betw(graph_object2016)$res
+values2016$pit<-rownames(values2016)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2016<-as.data.frame(rowCVs(network2016)) %>% rename(CV="rowCVs(network2016)")
+CVlist2016$pit<-rownames(CVlist2016)
+allvalues2016<-merge(values2016, CVlist2016, by="pit")
+allvalues2016$reader_year<-2016
+
+values2017<-as.data.frame(degree(graph_object2017)) %>% rename(degree="degree(graph_object2017)")
+values2017$cb<-centr_betw(graph_object2017)$res
+values2017$pit<-rownames(values2017)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2017<-as.data.frame(rowCVs(network2017)) %>% rename(CV="rowCVs(network2017)")
+CVlist2017$pit<-rownames(CVlist2017)
+allvalues2017<-merge(values2017, CVlist2017, by="pit")
+allvalues2017$reader_year<-2017
+
+values2018<-as.data.frame(degree(graph_object2018)) %>% rename(degree="degree(graph_object2018)")
+values2018$cb<-centr_betw(graph_object2018)$res
+values2018$pit<-rownames(values2018)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2018<-as.data.frame(rowCVs(network2018)) %>% rename(CV="rowCVs(network2018)")
+CVlist2018$pit<-rownames(CVlist2018)
+allvalues2018<-merge(values2018, CVlist2018, by="pit")
+allvalues2018$reader_year<-2018
+
+values2019<-as.data.frame(degree(graph_object2019)) %>% rename(degree="degree(graph_object2019)")
+values2019$cb<-centr_betw(graph_object2019)$res
+values2019$pit<-rownames(values2019)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2019<-as.data.frame(rowCVs(network2019)) %>% rename(CV="rowCVs(network2019)")
+CVlist2019$pit<-rownames(CVlist2019)
+allvalues2019<-merge(values2019, CVlist2019, by="pit")
+allvalues2019$reader_year<-2019
+
+values2021<-as.data.frame(degree(graph_object2021)) %>% rename(degree="degree(graph_object2021)")
+values2021$cb<-centr_betw(graph_object2021)$res
+values2021$pit<-rownames(values2021)
+#for CV SRI, calculate the CV for each row - need to do this separately because I'm not convinced they would be in the same order as what's calculated from the graph_objects
+CVlist2021<-as.data.frame(rowCVs(network2021)) %>% rename(CV="rowCVs(network2021)")
+CVlist2021$pit<-rownames(CVlist2021)
+allvalues2021<-merge(values2021, CVlist2021, by="pit")
+allvalues2021$reader_year<-2021
+
+#repeat for all years then bind together
+allindidata<-rbind(allvalues2012, allvalues2013, allvalues2014, allvalues2015, allvalues2016, allvalues2017, allvalues2018, allvalues2019, allvalues2021)
+
+#keep only the known aged individuals
+allknowndata<-allindidata[allindidata$pit %in% knownagelist,]
+
+#do the same as above to join their age back in 
+allknownage<-merge(allknowndata, cohortinfo, by=c("pit", "reader_year"), all=TRUE) 
+
+#read back in the corrected table
+write.csv(allknownage, "allknownage.csv")
+
+
+#create the 3 plots that go into Figure 4 - arranged in powerpoint 
+allknownage %>% ggplot(aes(x=as.factor(corrected_age), y=degree))+geom_boxplot()+ylab("Node Degree") + xlab("Exact Age") + labs(colour="Year")+
+  theme_bw() + annotate("text",
+                        x = 1:length(table(as.factor(allknownage$corrected_age))),
+                        y = -15 ,
+                        label = table(as.factor(allknownage$corrected_age)),
+                        col = "black",
+                        vjust = - 1)
+
+allknownage %>% ggplot(aes(x=as.factor(corrected_age), y=cb))+geom_boxplot()+ylab("Betweenness Centrality") + xlab("Exact Age") + labs(colour="Year")+
+  theme_bw()+ annotate("text",
+                       x = 1:length(table(as.factor(allknownage$corrected_age))),
+                       y = -50 ,
+                       label = table(as.factor(allknownage$corrected_age)),
+                       col = "black",
+                       vjust = - 1)
+
+
+allknownage %>% ggplot(aes(x=as.factor(corrected_age), y=CV))+geom_boxplot()+ylab("CV SRI") + xlab("Exact Age") + labs(colour="Year")+
+  theme_bw() + annotate("text",
+                        x = 1:length(table(as.factor(allknownage$corrected_age))),
+                        y = 0 ,
+                        label = table(as.factor(allknownage$corrected_age)),
+                        col = "black",
+                        vjust = - 1)
+
+```
+
