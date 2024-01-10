@@ -5,8 +5,6 @@ date: "07/03/2022"
 output: pdf_document
 ---
 
-All of the following analyses use the data file pregnancydataset.RData which is the same as used in the seasonl paper. For some portions of this code, capture data including the individual ages is also used. A subset of the capturedatabase including just the required info for those specific individuals is referenced in this code. 
-
 #Lagged Association Rate (Figure 1)
 
 This first code chunk is used to calculate the lagged association rates (Figure 1) and relies on the pregnancydataset.RData
@@ -14,7 +12,7 @@ This first code chunk is used to calculate the lagged association rates (Figure 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-#load in and rename the dataset and the required packages
+#load in dataset containing day roost records from the appropriate season and rename the dataset and the required packages
 load("pregnancydataset.RData")
 
 library(data.table)
@@ -282,7 +280,7 @@ This next bit is what will require using the capture data to get individual ages
 For these analyses I have included the code to run all years as this is what is needed for the figure. The networks being compared do not require the subsetting as above as it is not required that only individuals present in multiple years are used to find the known-aged individuals' network position. 
 
 ```{r}
-#read in the pregnancy data
+#read in the reader data from the appropriate season
 
 load("pregnancydataset.RData")
 
